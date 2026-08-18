@@ -1,6 +1,6 @@
 // 通用 /stream/ 转发器逻辑测试（Node 22+）
 // 全部域名虚构（example.com / example.org），零真实域名。
-import { handleRequest, isAllowedHost, rewriteEndpoint } from '../functions/stream/[[path]].js';
+import { handleRequest, isAllowedHost, rewriteEndpoint } from '../edge-functions/stream/[[default]].js';
 import assert from 'node:assert';
 
 const WL = ['example.com'];

@@ -15,11 +15,13 @@
 ## 目录结构
 
 ```
-functions/stream/[[path]].js   转发函数（EdgeOne Pages Functions 约定）
-tools/gateway.test.mjs         本地单元测试（Node 22+）
+edge-functions/stream/[[default]].js   转发函数（EdgeOne Makers Edge Functions 约定）
+tools/gateway.test.mjs                 本地单元测试（Node 22+）
 ```
 
-> 用 EdgeOne Makers 部署时把文件放到 `edge-functions/stream/[[path]].js`（同一份代码）。
+> Makers 是**全栈平台**：一个项目可同时托管静态资源与函数，静态优先于函数路由。
+> Edge Functions 用 `edge-functions/` 目录（多级 catch-all 命名 `[[default]].js`）。
+> 若用旧的 Pages Functions 部署，同一份代码放 `functions/stream/[[path]].js` 即可。
 
 ## 部署
 
