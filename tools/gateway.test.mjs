@@ -116,4 +116,68 @@ console.log('rewriteEndpoint: OK');
   console.log('handleRequest/post-forward: OK');
 }
 
+// ── 加固：CONNECT / TRACE 拒绝 ──
+// 注：undici 的 Request 构造器不允许 CONNECT/TRACE，这里用裸对象（handleRequest
+// 只读 method/url/headers，方法检查在触碰 body 之前）。真实运行时 CONNECT 大多到
+// 不了边缘函数，此拒是防御性兜底。
+{
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response('x'); };
+  for (const m of ['CONNECT', 'TRACE']) {
+    const fakeReq = { method: m, url: 'https://gw.example.org/core.example.com/foo', headers: new Headers() };
+    const resp = await handleRequest(fakeReq, ENV);
+    assert.equal(resp.status, 405, m + ' rejected');
+  }
+  assert(!called, 'fetch not called for disallowed methods');
+  console.log('handleRequest/method-reject: OK');
+}
+
+// ── 加固：非 443 端口拒绝 / :443 剥掉转发 ──
+{
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response('x'); };
+  const resp1 = await handleRequest(new Request('https://gw.example.org/core.example.com:8443/api/foo'), ENV);
+  assert.equal(resp1.status, 400, 'non-443 port rejected');
+  assert(!called, 'fetch not called for bad port');
+  globalThis.fetch = async (url) => {
+    assert.equal(url, 'https://core.example.com/api/foo', 'port stripped, default https');
+    return new Response('ok', { status: 200 });
+  };
+  const resp2 = await handleRequest(new Request('https://gw.example.org/core.example.com:443/api/foo'), ENV);
+  assert.equal(resp2.status, 200);
+  console.log('handleRequest/port-guard: OK');
+}
+
+// ── 加固：路径注入（非法编码 / 编码控制字符）拒绝 ──
+{
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response('x'); };
+  for (const p of ['/api/%zz/foo', '/api/%0d%0a/foo']) {
+    const resp = await handleRequest(new Request('https://gw.example.org/core.example.com' + p), ENV);
+    assert.equal(resp.status, 400, 'path injection rejected: ' + p);
+  }
+  assert(!called, 'fetch not called for injected paths');
+  console.log('handleRequest/path-injection: OK');
+}
+
+// ── 加固：无 KV 时限流跳过（不崩、正常转发）──
+{
+  globalThis.fetch = async () => new Response('ok', { status: 200 });
+  const env = { PROXY_WHITELIST: 'example.com', RATE_LIMIT_PER_MIN: '5' };
+  const resp = await handleRequest(new Request('https://gw.example.org/core.example.com/api/foo'), env);
+  assert.equal(resp.status, 200, 'no kv binding, rate limit skipped');
+  console.log('handleRequest/rate-limit-nokv: OK');
+}
+
+// ── 加固：超时配置存在 ──
+{
+  globalThis.fetch = async (url, init) => {
+    assert(init.eo && init.eo.timeoutSetting && init.eo.timeoutSetting.readTimeout > 0, 'timeoutSetting present');
+    return new Response('ok', { status: 200 });
+  };
+  const resp = await handleRequest(new Request('https://gw.example.org/core.example.com/api/foo'), ENV);
+  assert.equal(resp.status, 200);
+  console.log('handleRequest/timeout-config: OK');
+}
+
 console.log('\nALL GENERIC GATEWAY TESTS PASSED');

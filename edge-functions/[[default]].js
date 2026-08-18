@@ -13,16 +13,26 @@
 //   PROXY_WHITELIST      代理目标域名白名单，逗号分隔，后缀匹配。
 //                        缺失或为空 → 全部拒绝（fail-closed，绝不代理一切）。
 //   EXTRA_DENY_SUFFIXES  额外硬排除后缀，逗号分隔（可选，默认无）。
+//   RATE_LIMIT_PER_MIN   每 IP 每分钟最大请求数（可选，默认不限）。
+//                        启用需在 Makers 控制台绑定一个 KV 命名空间，变量名 kv。
+//   CLIENT_IP_HEADER     取客户端 IP 用的请求头（默认 x-forwarded-for）。
 //   网关自身域名不配置：由请求 URL 推导，目标 host 命中网关域名即拒绝（防自环）。
 //
-// 安全：
-//   - 白名单后缀匹配（example.com 命中 a.example.com 这类规则），白名单外一律 403。
+// 安全（防滥用 / 防崩溃）：
+//   - 白名单后缀匹配，白名单外一律 403；EXTRA_DENY 优先于白名单。
 //   - 网关自身域名（请求 Host）硬拒绝 → 自环防护。
 //   - 回环 / 私有 / 保留 IP 段硬拒绝 → SSRF 防护。
-//   - host 段只许域名合法字符（拒 @ % \ 等），IP 字面量天然过不了域名白名单。
+//   - host 段只许域名合法字符（拒 @ % \ 等）。
+//   - 拒绝 CONNECT / TRACE（防把网关当隧道）。
+//   - 请求体上限 1MB 预检（413）；snaa 改写只缓冲小响应（大响应原样透传）。
+//   - 顶层 try/catch 兜底：任何未预期异常 → 502，绝不裸崩。
+//   - 可选 per-IP 限流（KV，最终一致性，best-effort）。
+//   - 每请求一行 console.log（host/method/status/耗时），供日志分析排查与发现滥用。
 // ============================================================================
 
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024; // 平台请求体上限 1MB
+const MAX_BUFFERED_RESPONSE = 256 * 1024;    // snaa 改写只缓冲 ≤256KB 的响应
+const DISALLOWED_METHODS = ["CONNECT", "TRACE"];
 
 // 逐跳头，一律不转发
 const HOP_BY_HOP = [
@@ -54,7 +64,7 @@ function isPrivateIpv4(h) {
   return false;
 }
 
-// host 是否禁止代理。host 可能带 :port，先剥端口。
+// host 是否允许代理。host 可能带 :port，先剥端口。
 // selfHost = 网关自身域名（从请求推导）；命中即拒（防自环）。
 function isAllowedHost(host, whitelist, selfHost) {
   let h = host;
@@ -101,6 +111,33 @@ function loadExtraDeny(env) {
   return [];
 }
 
+// 取客户端 IP（限流用）。优先取配置的请求头，默认 x-forwarded-for 首值。
+function clientIp(request, env) {
+  const h = (env && env.CLIENT_IP_HEADER) || "x-forwarded-for";
+  const v = request.headers.get(h);
+  if (v) return v.split(",")[0].trim();
+  return "unknown";
+}
+
+// 可选 per-IP 限流（KV）。KV 未绑定 / 未配置 / 故障时放行（fail-open，不阻断正常流量）。
+async function rateLimited(request, env) {
+  const limit = env && Number(env.RATE_LIMIT_PER_MIN);
+  if (!(limit > 0)) return false;
+  if (typeof kv === "undefined") return false;
+  try {
+    const ip = clientIp(request, env);
+    const minute = Math.floor(Date.now() / 60000);
+    const key = "rl:" + ip + ":" + minute;
+    const cur = await kv.get(key);
+    const n = cur ? Number(cur) : 0;
+    if (n >= limit) return true;
+    await kv.put(key, String(n + 1));
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
 // 把上游 endpoint 值改写成经网关访问的地址；不该改时返回 null。
 // gwOrigin 由请求 URL 推导（如 https://api.example.top），网关域不写死在代码里。
 function rewriteEndpoint(ep, gwOrigin, whitelist, selfHost) {
@@ -117,10 +154,23 @@ function rewriteEndpoint(ep, gwOrigin, whitelist, selfHost) {
 
 // 核心处理函数
 async function handleRequest(request, env) {
+  const startedAt = Date.now();
   const url = new URL(request.url);
   const whitelist = loadWhitelist(env);
   const denyExtra = loadExtraDeny(env);
   const selfHost = url.hostname; // 网关自身域名 = 请求 Host
+
+  // 拒绝隧道类方法（防把网关当 CONNECT 隧道 / TRACE 反射）
+  if (DISALLOWED_METHODS.includes(request.method)) {
+    console.log("[gateway] " + request.method + " rejected");
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  // 可选限流（KV，best-effort）
+  if (await rateLimited(request, env)) {
+    console.log("[gateway] rate limited " + clientIp(request, env));
+    return new Response("rate limit exceeded", { status: 429 });
+  }
 
   // 根 catch-all：/<host>/<path> 直接按转发处理（无前缀）。
   // 根路径本身（/）与静态文件由 Makers 静态托管优先处理，到不了这里。
@@ -131,6 +181,30 @@ async function handleRequest(request, env) {
   const host = slash < 0 ? rest : rest.slice(0, slash);
   let path = slash < 0 ? "" : rest.slice(slash);
   path = path.replace(/^\/+/, "/"); // 多斜杠归一个
+
+  // 端口校验：host 带端口只允许 443，其余一律拒——白名单只查 host 不查端口，
+  // 不加这关就等于给了「对白名单域名任意端口扫描/打非 443 服务」的通道。
+  let forwardHost = host;
+  const pc = host.lastIndexOf(":");
+  if (pc >= 0) {
+    const port = host.slice(pc + 1);
+    if (!/^\d+$/.test(port) || Number(port) !== 443) {
+      return new Response("forbidden: port not allowed", { status: 400 });
+    }
+    forwardHost = host.slice(0, pc); // :443 剥掉，统一走默认 https 端口
+  }
+
+  // 路径注入防护：解码后拒控制字符与反斜杠（\x00-\x1f\x7f 与 \），防 %0d%0a 之类
+  // 编码控制字符注入转发 URL；非法编码（%zz）也一并拒。
+  let decodedPath = "";
+  try {
+    decodedPath = decodeURIComponent(path);
+  } catch (e) {
+    return new Response("bad request: malformed path", { status: 400 });
+  }
+  if (/[\x00-\x1f\x7f\\]/.test(decodedPath)) {
+    return new Response("bad request: invalid path", { status: 400 });
+  }
 
   // 先 DENY（EXTRA_DENY_SUFFIXES），再 ALLOW（PROXY_WHITELIST），DENY 优先。
   if (denyExtra.some((d) => suffixMatch(host.toLowerCase(), d)) ||
@@ -158,16 +232,31 @@ async function handleRequest(request, env) {
   const init = {
     method: request.method,
     headers,
-    redirect: "manual",
+    redirect: "manual", // 3xx 原样回给客户端，不自己跟（省 fetch 配额，Location 由客户端决定）
+    eo: {
+      timeoutSetting: {
+        connectTimeout: 30000, // 默认 15s 对大文件/慢源太紧；放宽到 30s 连接
+        readTimeout: 120000,   // 读取超时 120s（流式传输，有字节流动即重置）
+        writeTimeout: 60000,
+      },
+    },
   };
   if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = await request.text();
+    // body 读取失败（如超 1MB、流异常）→ 返回 413/400，不让它裸崩
+    let body;
+    try {
+      body = await request.text();
+    } catch (e) {
+      return new Response("bad request body", { status: 400 });
+    }
+    init.body = body;
   }
 
   let upstream;
   try {
-    upstream = await fetch("https://" + host + path + (url.search || ""), init);
+    upstream = await fetch("https://" + forwardHost + path + (url.search || ""), init);
   } catch (e) {
+    // 上游连不上 / 超时：502。客户端对非 2xx 自动走直连回退。
     return new Response("gateway upstream error: " + e.message,
       { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
@@ -181,6 +270,8 @@ async function handleRequest(request, env) {
   if (typeof upstream.headers.getSetCookie === "function") {
     for (const v of upstream.headers.getSetCookie()) respHeaders.append("Set-Cookie", v);
   }
+  // 上游若仍返回压缩体（忽略 identity），运行时已把 body 解压，头与体不符：
+  // 丢掉 content-encoding / content-length，交给运行时按解压后字节流重组。
   const enc = (upstream.headers.get("content-encoding") || "").toLowerCase();
   if (enc && enc !== "identity") {
     respHeaders.delete("content-encoding");
@@ -197,28 +288,44 @@ async function handleRequest(request, env) {
     } catch (e) { /* 相对/非法 Location，原样透传 */ }
   }
 
-  // ── 引导接口特例：改写 endpoint 字段 ──
+  // ── 引导接口特例：改写 endpoint 字段（只缓冲小响应，大响应原样透传）──
   if (url.pathname.replace(/\/+$/, "").endsWith(SNAA_PATH_SUFFIX)) {
-    const text = await upstream.text();
-    let rewritten = text;
+    let text = null;
     try {
-      const obj = JSON.parse(text);
-      if (obj && obj.response && typeof obj.response.endpoint === "string") {
-        const neu = rewriteEndpoint(obj.response.endpoint, url.origin, whitelist, selfHost);
-        if (neu && text.includes(obj.response.endpoint)) {
-          rewritten = text.split(obj.response.endpoint).join(neu);
-        }
+      const len = upstream.headers.get("content-length");
+      if (!len || Number(len) <= MAX_BUFFERED_RESPONSE) {
+        text = await upstream.text();
       }
-    } catch (e) { /* 非 JSON，原样透传 */ }
+    } catch (e) { /* 读取失败 → 按透传处理 */ }
 
-    if (rewritten !== text) {
-      respHeaders.delete("content-encoding");
-      respHeaders.delete("content-length");
-      respHeaders.set("content-length", String(new TextEncoder().encode(rewritten).byteLength));
+    if (text !== null) {
+      let rewritten = text;
+      try {
+        const obj = JSON.parse(text);
+        if (obj && obj.response && typeof obj.response.endpoint === "string") {
+          const neu = rewriteEndpoint(obj.response.endpoint, url.origin, whitelist, selfHost);
+          if (neu && text.includes(obj.response.endpoint)) {
+            // 精确替换原字符串值，保留 JSON 原有字段顺序与空白。
+            rewritten = text.split(obj.response.endpoint).join(neu);
+          }
+        }
+      } catch (e) { /* 非 JSON，原样透传 */ }
+
+      if (rewritten !== text) {
+        respHeaders.delete("content-encoding");
+        respHeaders.delete("content-length");
+        respHeaders.set("content-length", String(new TextEncoder().encode(rewritten).byteLength));
+      }
+      console.log("[gateway] " + request.method + " " + host + path + " -> " + upstream.status
+        + " (" + (Date.now() - startedAt) + "ms)");
+      return new Response(rewritten, { status: upstream.status, headers: respHeaders });
     }
-    return new Response(rewritten, { status: upstream.status, headers: respHeaders });
+    // 大响应 / 读取失败：落到下面的流式透传
   }
 
+  // ── 普通透传：body 流式转发（大文件 / Range / 分块都能扛）──
+  console.log("[gateway] " + request.method + " " + host + path + " -> " + upstream.status
+    + " (" + (Date.now() - startedAt) + "ms)");
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -228,7 +335,16 @@ async function handleRequest(request, env) {
 
 // ═══ 模型 A：EdgeOne Makers / Pages Functions（文件路由）═══
 export async function onRequest(context) {
-  return handleRequest(context.request, context.env);
+  // 顶层兜底：任何未预期异常 → 502，绝不裸崩（避免网关静默失效）
+  try {
+    return await handleRequest(context.request, context.env);
+  } catch (e) {
+    console.log("[gateway] internal error: " + e.message);
+    return new Response("gateway internal error", {
+      status: 502,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
 }
 
 // ═══ 仅供本地单元测试导出；EdgeOne 运行时忽略多余命名导出 ═══
