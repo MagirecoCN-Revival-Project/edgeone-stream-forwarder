@@ -6,7 +6,7 @@
 <title>网关探针</title>
 <meta name="robots" content="noindex, nofollow">
 <meta name="googlebot" content="noindex, nofollow">
-<meta name="description" content="EdgeOne /stream/ 转发网关探针。看到这个页面说明网关域名网络通畅。">
+<meta name="description" content="EdgeOne 边缘函数转发网关探针。看到这个页面说明网关域名网络通畅。">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -41,7 +41,7 @@
     <div><span class="lbl">网关函数</span><span id="fn">检测中…</span></div>
     <div><span class="lbl">函数延迟</span><span id="latency">—</span></div>
   </div>
-  <footer>本页不参与搜索引擎收录。网关端点：/stream/&lt;host&gt;/&lt;path&gt;</footer>
+  <footer>本页不参与搜索引擎收录。网关端点：/&lt;host&gt;/&lt;path&gt;</footer>
 </main>
 <script>
   // 探针网关函数：请求一个白名单外的 host（probe.invalid 是虚构域名，必被拒）。
@@ -67,7 +67,7 @@
         });
       }
       if (r.status === 404) {
-        fn.textContent = '✗ 函数未部署（/stream/ 无路由）';
+        fn.textContent = '✗ 函数未部署（代理路由未生效）';
         fn.className = 'bad';
         return;
       }
