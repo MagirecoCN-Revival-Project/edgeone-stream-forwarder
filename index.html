@@ -45,13 +45,13 @@
 </main>
 <script>
   // 探针网关函数：请求一个白名单外的 host（probe.invalid 是虚构域名，必被拒）。
-  // 函数应返回 403 + "forbidden"；静态服务器不会路由 /stream/，所以 403 只能来自
-  // 函数本身 → 证明函数已部署、白名单在拦。
+  // 函数应返回 403 + "forbidden"；静态服务器不代理 /<host>/ 路径，所以 403 只能
+  // 来自函数本身 → 证明函数已部署、白名单在拦。
   // 注意：PROXY_WHITELIST 未配置时函数 fail-closed 也会 403——本页只证明"函数在跑"，
   // 白名单值对不对另用 curl 自测（见 README）。
   document.getElementById('host').textContent = location.hostname;
   var start = performance.now();
-  fetch('/stream/probe.invalid/__gateway_probe', { cache: 'no-store' })
+  fetch('/probe.invalid/__gateway_probe', { cache: 'no-store' })
     .then(function (r) {
       var ms = (performance.now() - start).toFixed(0);
       var lat = document.getElementById('latency');

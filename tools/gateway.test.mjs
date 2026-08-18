@@ -1,6 +1,6 @@
 // 通用 /stream/ 转发器逻辑测试（Node 22+）
 // 全部域名虚构（example.com / example.org），零真实域名。
-import { handleRequest, isAllowedHost, rewriteEndpoint } from '../edge-functions/stream/[[default]].js';
+import { handleRequest, isAllowedHost, rewriteEndpoint } from '../edge-functions/[[default]].js';
 import assert from 'node:assert';
 
 const WL = ['example.com'];
@@ -35,8 +35,8 @@ console.log('isAllowedHost: OK (22 cases)');
 
 // ── rewriteEndpoint(ep, gwOrigin, whitelist, selfHost) ──
 assert.equal(rewriteEndpoint('https://res.example.com/en', GW_ORIGIN, WL),
-  'https://gw.example.org/stream/res.example.com/en');
-assert.equal(rewriteEndpoint('https://gw.example.org/stream/res.example.com/en', GW_ORIGIN, WL), null, 'idempotent');
+  'https://gw.example.org/res.example.com/en');
+assert.equal(rewriteEndpoint('https://gw.example.org/res.example.com/en', GW_ORIGIN, WL), null, 'idempotent');
 assert.equal(rewriteEndpoint('https://evil.com/en', GW_ORIGIN, WL), null, 'non-whitelist passthrough');
 assert.equal(rewriteEndpoint('not-a-url', GW_ORIGIN, WL), null, 'bad url');
 console.log('rewriteEndpoint: OK');
@@ -45,12 +45,12 @@ console.log('rewriteEndpoint: OK');
 {
   const snaaBody = JSON.stringify({ message: 'snaa', response: { endpoint: 'https://res.example.com/en', max_threads: 4, version: 128 }, status: 200 });
   globalThis.fetch = async () => new Response(snaaBody, { status: 200, headers: { 'content-type': 'application/json' } });
-  const req = new Request('https://gw.example.org/stream/bootstrap.example.com/magica/api/snaa',
+  const req = new Request('https://gw.example.org/bootstrap.example.com/magica/api/snaa',
     { method: 'POST', body: '{"version":128}', headers: { 'content-type': 'application/json' } });
   const resp = await handleRequest(req, ENV);
   const body = await resp.text();
   assert.equal(resp.status, 200);
-  assert(body.includes('https://gw.example.org/stream/res.example.com/en'), 'endpoint rewritten to request origin');
+  assert(body.includes('https://gw.example.org/res.example.com/en'), 'endpoint rewritten to request origin');
   assert(body.includes('"version":128'), 'rest preserved');
   console.log('handleRequest/snaa: OK ->', body);
 }
@@ -61,7 +61,7 @@ console.log('rewriteEndpoint: OK');
     assert.equal(url, 'https://res.example.com/en/magica/resource?x=1', 'upstream url correct');
     return new Response('asset-list', { status: 200, headers: { 'content-type': 'text/plain', etag: 'W/"abc"' } });
   };
-  const resp = await handleRequest(new Request('https://gw.example.org/stream/res.example.com/en/magica/resource?x=1'), ENV);
+  const resp = await handleRequest(new Request('https://gw.example.org/res.example.com/en/magica/resource?x=1'), ENV);
   assert.equal(resp.status, 200);
   assert.equal(await resp.text(), 'asset-list');
   console.log('handleRequest/passthrough: OK');
@@ -72,9 +72,9 @@ console.log('rewriteEndpoint: OK');
   let called = false;
   globalThis.fetch = async () => { called = true; return new Response('x'); };
   for (const u of [
-    'https://gw.example.org/stream/evil.example.net/foo',
-    'https://gw.example.org/stream/gw.example.org/foo',
-    'https://gw.example.org/stream/core.example.com/api/foo', // env 空白名单
+    'https://gw.example.org/evil.example.net/foo',
+    'https://gw.example.org/gw.example.org/foo',
+    'https://gw.example.org/core.example.com/api/foo', // env 空白名单
   ]) {
     const resp = await handleRequest(new Request(u), u.includes('core.example.com') ? {} : ENV);
     assert.equal(resp.status, 403, u);
@@ -88,7 +88,7 @@ console.log('rewriteEndpoint: OK');
   const env = { PROXY_WHITELIST: 'example.com', EXTRA_DENY_SUFFIXES: 'blocked.example.com' };
   let called = false;
   globalThis.fetch = async () => { called = true; return new Response('x'); };
-  const resp = await handleRequest(new Request('https://gw.example.org/stream/x.blocked.example.com/foo'), env);
+  const resp = await handleRequest(new Request('https://gw.example.org/x.blocked.example.com/foo'), env);
   assert.equal(resp.status, 403, 'extra deny wins over whitelist');
   assert(!called);
   console.log('handleRequest/extra-deny: OK');
@@ -97,7 +97,7 @@ console.log('rewriteEndpoint: OK');
 // ── handleRequest: 上游失败 502 ──
 {
   globalThis.fetch = async () => { throw new Error('connect timeout'); };
-  const resp = await handleRequest(new Request('https://gw.example.org/stream/bootstrap.example.com/magica/api/snaa'), ENV);
+  const resp = await handleRequest(new Request('https://gw.example.org/bootstrap.example.com/magica/api/snaa'), ENV);
   assert.equal(resp.status, 502);
   console.log('handleRequest/upstream-error-502: OK');
 }
@@ -110,7 +110,7 @@ console.log('rewriteEndpoint: OK');
     assert.equal(init.body, '{"k":1}');
     return new Response('ok', { status: 200 });
   };
-  const resp = await handleRequest(new Request('https://gw.example.org/stream/core.example.com/magica/api/anything',
+  const resp = await handleRequest(new Request('https://gw.example.org/core.example.com/magica/api/anything',
     { method: 'POST', body: '{"k":1}', headers: { 'content-type': 'application/json' } }), ENV);
   assert.equal(resp.status, 200);
   console.log('handleRequest/post-forward: OK');

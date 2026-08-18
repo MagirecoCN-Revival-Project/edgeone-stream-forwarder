@@ -1,12 +1,13 @@
 // ============================================================================
-// EdgeOne 通用 /stream/ 反向代理（边缘函数）
+// EdgeOne 通用反向代理（边缘函数）
 // ----------------------------------------------------------------------------
-// 部署：functions/stream/[[path]].js（EdgeOne Pages Functions）
-//       或 edge-functions/stream/[[path]].js（EdgeOne Makers 边缘函数）——二选一
+// 部署：edge-functions/[[default]].js（EdgeOne Makers 边缘函数，根 catch-all）
+//       或 functions/[[default]].js（Pages Functions）——二选一
 //
-// 用途：把 <网关域>/stream/<host>/<path> 请求经 EdgeOne 边缘转发到
-//       https://<host>/<path>，并把引导接口响应里的 endpoint 字段改写为
-//       经网关的地址，让后续请求也走网关。
+// 用途：把 <网关域>/<host>/<path> 请求经 EdgeOne 边缘转发到 https://<host>/<path>，
+//       并把引导接口响应里的 endpoint 字段改写为经网关的地址，让后续请求也走网关。
+//       网关域独占此转发用途，故无 /stream/ 之类前缀；域名根（/ 与 index.html、
+//       robots.txt）由 Makers 静态托管，其余路径全部进入本函数。
 //
 // 配置（全环境变量注入，代码里不写任何域名）：
 //   PROXY_WHITELIST      代理目标域名白名单，逗号分隔，后缀匹配。
@@ -108,7 +109,7 @@ function rewriteEndpoint(ep, gwOrigin, whitelist, selfHost) {
     const gwHost = new URL(gwOrigin).hostname;
     if (u.hostname === gwHost) return null;                        // 幂等：已是网关地址
     if (!isAllowedHost(u.hostname, whitelist, selfHost)) return null; // 不在白名单，客户端直连
-    return gwOrigin + "/stream/" + u.host + u.pathname + u.search;
+    return gwOrigin + "/" + u.host + u.pathname + u.search;
   } catch (e) {
     return null;
   }
@@ -121,11 +122,9 @@ async function handleRequest(request, env) {
   const denyExtra = loadExtraDeny(env);
   const selfHost = url.hostname; // 网关自身域名 = 请求 Host
 
-  if (!url.pathname.startsWith("/stream/")) {
-    return new Response("not found", { status: 404 });
-  }
-
-  let rest = url.pathname.slice("/stream/".length);
+  // 根 catch-all：/<host>/<path> 直接按转发处理（无前缀）。
+  // 根路径本身（/）与静态文件由 Makers 静态托管优先处理，到不了这里。
+  let rest = url.pathname.replace(/^\/+/, "");
   if (!rest) return new Response("bad request: missing host", { status: 400 });
 
   const slash = rest.indexOf("/");
@@ -193,7 +192,7 @@ async function handleRequest(request, env) {
     try {
       const loc = new URL(respHeaders.get("location"), "https://" + host);
       if (loc.hostname && isAllowedHost(loc.hostname, whitelist, selfHost)) {
-        respHeaders.set("location", url.origin + "/stream/" + loc.host + loc.pathname + loc.search);
+        respHeaders.set("location", url.origin + "/" + loc.host + loc.pathname + loc.search);
       }
     } catch (e) { /* 相对/非法 Location，原样透传 */ }
   }
