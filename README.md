@@ -16,12 +16,18 @@
 
 ```
 edge-functions/stream/[[default]].js   转发函数（EdgeOne Makers Edge Functions 约定）
+index.html                             网关探针页（noindex；页面=域名通，函数状态实时检测）
+robots.txt                             拒绝所有爬虫（与 index.html 的 noindex 双管齐下）
 tools/gateway.test.mjs                 本地单元测试（Node 22+）
 ```
 
 > Makers 是**全栈平台**：一个项目可同时托管静态资源与函数，静态优先于函数路由。
 > Edge Functions 用 `edge-functions/` 目录（多级 catch-all 命名 `[[default]].js`）。
 > 若用旧的 Pages Functions 部署，同一份代码放 `functions/stream/[[path]].js` 即可。
+>
+> **探针页怎么用**：浏览器打开 `<网关域>/`——页面加载说明 Makers 项目 + 域名 + DNS
+> 都通；页面内会自动 fetch `/stream/probe.invalid/__gateway_probe`，期待 403
+> （静态服务器不会路由 `/stream/`，403 只可能来自函数），据此显示网关函数是否在线。
 
 ## 部署
 
